@@ -1,104 +1,71 @@
+
 #include <WiFi.h>
 #include <DNSServer.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
+#include <WebServer.h>
 
-// ===== CONFIGURATION ===== //
-const char *apSSID = "Free_WiFi";
-const char *staSSID = "Aeiou";
-const char *staPassword = "helloworld";
-const IPAddress local_IP(192, 168, 4, 1);
-const IPAddress gateway(192, 168, 4, 1);
-const IPAddress subnet(255, 255, 255, 0);
+// ===== CONFIGURATION =====
+const char* apSSID = "MyESP32_AP";
+const char* apPassword = "12345678";
+const char* staSSID = "Aeiou";
+const char* staPassword = "helloworld";
+IPAddress apIP(192, 168, 4, 1);
+IPAddress netMsk(255, 255, 255, 0);
+const byte DNS_PORT = 53;
 
 DNSServer dnsServer;
-AsyncWebServer server(80);
+WebServer server(80);
 
-// ========== Connect to Upstream WiFi (STA mode) ========== //
-void connectToSTA() {
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.begin(staSSID, staPassword);
-  Serial.print("Connecting to upstream WiFi");
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+// Whitelisted domains (add more if needed)
+const char* whitelist[] = {
+  "example.com",
+  "openai.com"
+};
+const int whitelistSize = sizeof(whitelist) / sizeof(whitelist[0]);
+
+bool isWhitelisted(const String& query) {
+  Serial.println(query);
+  for (int i = 0; i < whitelistSize; i++) {
+    if (query.indexOf(whitelist[i]) >= 0) return true;
   }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConnected to STA!");
-    Serial.print("STA IP: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\nFailed to connect to STA.");
-  }
+  return false;
 }
 
-// ========== Start Access Point ========== //
-void startAP() {
-  WiFi.softAPConfig(local_IP, gateway, subnet);
-  WiFi.softAP(apSSID);
-  delay(100);
-  Serial.print("AP IP address: ");
-  Serial.println(WiFi.softAPIP());
-
-  // DNS: redirect all domains to ESP32's IP
-  dnsServer.start(53, "*", local_IP);
+void handleRoot() {
+  server.send(200, "text/html", "<html><body><h1>Access Restricted</h1><p>You are being redirected because the domain is not whitelisted.</p><script>setInterval(()=>alert('ESP32 Notification'), 15000);</script></body></html>");
 }
 
-// ========== URL Filter Logic ========== //
-bool allowRequest(String host) {
-  return host.indexOf("204") >= 0;
-}
-
-// ========== Start Web Server ========== //
-void startWebServer() {
-  server.onNotFound([](AsyncWebServerRequest *request) {
-    String hostHeader = request->host();
-    Serial.println("Incoming request: " + hostHeader);
-
-    // Allow only if URL contains "204"
-    if (allowRequest(hostHeader)) {
-      request->send(204); // Return no content
-      return;
-    }
-
-    // All others get redirected page with notification polling
-    request->send(200, "text/html",
-      "<html><head><title>Notification</title></head>"
-      "<body><h1>Welcome to Free WiFi</h1>"
-      "<p>You are being monitored.</p>"
-      "<div id='note'></div>"
-      "<script>"
-      "setInterval(()=>{"
-      "  fetch('/notify').then(r=>r.text()).then(t=>{"
-      "    document.getElementById('note').innerText = '📢 Notification: ' + t;"
-      "  });"
-      "}, 5000);"
-      "</script>"
-      "</body></html>"
-    );
-  });
-
-  // Notification endpoint
-  server.on("/notify", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String notification = "Stay safe online! [" + String(random(1000, 9999)) + "]";
-    request->send(200, "text/plain", notification);
-  });
-
-  server.begin();
-}
-
-// ========== Setup ========== //
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  connectToSTA();
-  startAP();
-  startWebServer();
+
+  // Connect to upstream WiFi (STA mode)
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(staSSID, staPassword);
+  Serial.print("Connecting to STA");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Connected to STA");
+
+  // Start AP
+  WiFi.softAP(apSSID, apPassword);
+  WiFi.softAPConfig(apIP, apIP, netMsk);
+  Serial.println("AP Started");
+
+  // Start DNS spoofing server
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  // DNS request handler (check whitelist)
+  dnsServer.setTTL(60);
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+
+  // Start captive web server
+  server.onNotFound(handleRoot);
+  server.begin();
+  Serial.println("Web server started");
 }
 
-// ========== Main Loop ========== //
 void loop() {
   dnsServer.processNextRequest();
+  server.handleClient();
 }
